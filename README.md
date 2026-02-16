@@ -1,0 +1,1 @@
+the models above are just for demo and understanding the architecture of sequence to sequence architecture with attention mechanism in LSTM. in order to train the model properly, we should have to define hyperparameters accordingly
