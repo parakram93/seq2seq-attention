@@ -214,41 +214,50 @@ class Decoder(nn.Module):
         x = x.unsqueeze(0)
         embedded = self.dropout(self.embedding(x))
 
+               # ===== PURE TRANSFORMER SELF-ATTENTION (queries = keys = values = X) =====
+        # Build X: stack all previous decoder states + current state placeholder
         if len(prev_states) == 0:
-            batch = embedded.size(1)
-            context = torch.zeros(1, batch, hidden.size(2), device=x.device)
+            # no previous tokens → X only contains current embedding
+            X = embedded       # (1, batch, E)
         else:
-            H_prev = torch.cat(prev_states, dim=0)  # (T_prev, batch, enc_hidden)
-            
+            # previous states: (T_prev, batch, hidden)
+            H_prev = torch.cat(prev_states, dim=0)        # (T_prev, batch, hidden)
+            X = torch.cat([H_prev, embedded], dim=0)      # (T_prev+1, batch, hidden)
 
-            h_t = hidden[-1].unsqueeze(0)
-            Q = self.W_q(h_t)
-            K = self.W_k(H_prev)
-            V = self.W_v(H_prev)
+        # project to Q,K,V
+        Q = self.W_q(X)   # (T, batch, hidden)
+        K = self.W_k(X)
+        V = self.W_v(X)
 
-            # ... rest of multi-head attention remains the same
+        # Split into heads
+        def split_heads(t):
+            T, B, H = t.size()
+            t = t.view(T, B, self.num_heads, self.d_head)
+            return t.permute(1, 2, 0, 3)  # (batch, heads, T, d_head)
 
+        Q = split_heads(Q)
+        K = split_heads(K)
+        V = split_heads(V)
 
-            # ---- 2) Split into heads ----
-            def split_heads(x):
-                # x: (seq_len, batch, H)
-                seq_len, batch, H = x.size()
-                x = x.view(seq_len, batch, self.num_heads, self.d_head)
-                x = x.permute(1, 2, 0, 3)  # (batch, heads, seq_len, d_head)
-                return x
+        # Mask: prevent attending to future tokens
+        T = X.size(0)
+        mask = torch.triu(torch.ones(T, T, device=X.device), diagonal=1).bool()
+        # mask: (T, T)
 
-            Q = split_heads(Q)      # (batch, heads, 1, d_head)
-            K = split_heads(K)      # (batch, heads, T_prev, d_head)
-            V = split_heads(V)      # (batch, heads, T_prev, d_head)
+        # scaled dot-product attention
+        scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.d_head ** 0.5)
+        scores = scores.masked_fill(mask.unsqueeze(0).unsqueeze(0), float('-inf'))
 
-            # ---- 3) Compute scaled dot-product attention ----
-            scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.d_head ** 0.5)  # (batch, heads, 1, T_prev)
-            weights = self.softmax(scores)  # (batch, heads, 1, T_prev)
-            context = torch.matmul(weights, V)  # (batch, heads, 1, d_head)
+        weights = self.softmax(scores)
+        context = torch.matmul(weights, V)  # (batch, heads, T, d_head)
 
-            # ---- 4) Concatenate heads ----
-            context = context.permute(2, 0, 1, 3).contiguous()  # (1, batch, heads, d_head)
-            context = context.view(1, context.size(1), self.num_heads * self.d_head)  # (1, batch, H)
+        # take last timestep context (the newest token)
+        context = context[:, :, -1:, :]  # (batch, heads, 1, d_head)
+
+        # concat heads
+        context = context.permute(2, 0, 1, 3).contiguous()  # (1, batch, heads, d_head)
+        context = context.view(1, context.size(1), -1)      # (1, batch, hidden)
+
 
 
         # ---- 5) LSTM input ----
@@ -383,3 +392,4 @@ print(predict(model,write))
         
         
         
+
