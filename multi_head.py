@@ -221,7 +221,7 @@ class Decoder(nn.Module):
             X = embedded       # (1, batch, E)
         else:
             # previous states: (T_prev, batch, hidden)
-            H_prev = torch.cat(prev_states, dim=0)        # (T_prev, batch, hidden)
+            H_prev = torch.cat(prev_states, dim=0)        # (T_prev, batch, hidden), Transformer decoder needs history,Attention must see all past tokens
             X = torch.cat([H_prev, embedded], dim=0)      # (T_prev+1, batch, hidden)
 
         # project to Q,K,V
@@ -392,4 +392,5 @@ print(predict(model,write))
         
         
         
+
 
