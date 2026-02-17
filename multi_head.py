@@ -192,7 +192,7 @@ class Encoder(nn.Module):
         cell   = self.fc_cell(bilstm(cell))      # → (num_layers, batch, H)
 
         return encoder_states, hidden, cell
-
+#sef attention acc to paper is used
     
 class Decoder(nn.Module):
     def __init__(self, output_size, emb_size, hidden_size, num_layers, dropout, num_heads=4, encoder_hidden_size=None):
@@ -392,5 +392,6 @@ print(predict(model,write))
         
         
         
+
 
 
