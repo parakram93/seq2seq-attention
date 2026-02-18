@@ -11,6 +11,10 @@ import string
 from nltk import word_tokenize
 import nltk 
 
+# ------------------------------------------------------
+# --------------------- DATA PREP ----------------------
+# ------------------------------------------------------
+
 document = """
 Welcome to the general knowledge guide.
 People often ask questions about daily life. What should I eat for breakfast? Where can I find fresh vegetables? How do I manage my time effectively? Giving clear answers is important.
@@ -92,28 +96,27 @@ Fun facts and trivia. What is the fastest car? Where is the largest library? How
 This concludes the multi-topic general dataset example. The text above contains a mixture of questions, instructions, facts, stories, daily life tips, technical explanations, and casual conversation. 
 It is around 12,000 words and ideal for training a next-word predictor or autocomplete model.
 """
+
 label_text = [
     '<sos>', '<eos>'
 ]
 
 tokenize = word_tokenize(document.lower())
-
 tokens = [t for t in tokenize if t not in string.punctuation]
 
 nltk.download('punkt')
-vocab = {'<pad>':0, '<sos>':1, '<eos>':2, '<unk>':3}
 
+vocab = {'<pad>':0, '<sos>':1, '<eos>':2, '<unk>':3}
 pad_idx = 0
 
 for t in Counter(tokens).keys():
     if t not in vocab:
         vocab[t] = len(vocab)
-        
+
 input_sentences = document.split('\n')
-    
+
 def text_to_indices(sentence,vocab):
     numerical_sentence = []
-    
     for token in sentence:
         if token in vocab:
             numerical_sentence.append(vocab[token])
@@ -121,28 +124,26 @@ def text_to_indices(sentence,vocab):
             numerical_sentence.append(vocab['<unk>'])
     return numerical_sentence
 
-input_numerical_sentence =[]
-
+input_numerical_sentence = []
 for sentence in input_sentences:
     tkn = word_tokenize(sentence.lower())
     tkn = [t for t in tkn if t not in string.punctuation]
     input_numerical_sentence.append(text_to_indices(tkn, vocab))
-    
+
 training_sequence = []
-    
 for sentence in input_numerical_sentence:
     for i in range(len(sentence)):
         training_sequence.append(sentence[:i+1])
-max_len = max(len(seq) for seq in training_sequence )
-        
-        
-        
+
+max_len = max(len(seq) for seq in training_sequence)
+
 class CustomDataset(Dataset):
     def __init__(self, sentences, max_len):
         self.sequences = sentences
         self.max_len = max_len
         self.sos = vocab['<sos>']
         self.eos = vocab['<eos>']
+
     def __len__(self):
         return len(self.sequences)
     
@@ -154,11 +155,15 @@ class CustomDataset(Dataset):
         y = torch.tensor(padded[1:], dtype=torch.long)
         return x,y
     
-dataset  = CustomDataset(training_sequence, max_len=max_len)
-
+dataset = CustomDataset(training_sequence, max_len=max_len)
 loader = DataLoader(dataset=dataset, batch_size=32, shuffle=True)
 
-    
+
+
+# ------------------------------------------------------
+# --------------------- ENCODER ------------------------
+# ------------------------------------------------------
+
 class Encoder(nn.Module):
     def __init__(self, input_size, emb_size, hidden_size, num_layers, dropout):
         super().__init__()
@@ -173,27 +178,30 @@ class Encoder(nn.Module):
         self.fc_cell   = nn.Linear(hidden_size * 2, hidden_size)
 
     def forward(self, src):
-        # src: (batch, seq_len)
-        #src = src.T   # → (seq_len, batch)
         embedded = self.dropout(self.embedding(src))
         encoder_outputs, (hidden, cell) = self.rnn(embedded)
         encoder_states = encoder_outputs
-        # hidden shape: (num_layers*2, batch, H)
 
         def bilstm(h):
             pairs = []
             for i in range(0, h.size(0), 2):
-                fw = h[i]       # (1, batch, H)
-                bw = h[i+1]     # (1, batch, H)
-                pairs.append(torch.cat((fw, bw), dim=1))   # (1, batch, 2H)
-            return torch.stack(pairs)  # (num_layers, batch, 2H)
+                fw = h[i]
+                bw = h[i+1]
+                pairs.append(torch.cat((fw, bw), dim=1))
+            return torch.stack(pairs)
 
-        hidden = self.fc_hidden(bilstm(hidden))  # → (num_layers, batch, H)
-        cell   = self.fc_cell(bilstm(cell))      # → (num_layers, batch, H)
+        hidden = self.fc_hidden(bilstm(hidden))
+        cell   = self.fc_cell(bilstm(cell))
 
         return encoder_states, hidden, cell
 
-    
+
+
+# ------------------------------------------------------
+# ---------------------- DECODER -----------------------
+#  Self-attention over previous decoder hidden states
+# ------------------------------------------------------
+
 class Decoder(nn.Module):
     def __init__(self, output_size, emb_size, hidden_size, num_layers, dropout):
         super().__init__()
@@ -203,69 +211,63 @@ class Decoder(nn.Module):
 
         # LSTM takes: embedding + self-attention context
         self.rnn = nn.LSTM(
-            emb_size + hidden_size,
+            emb_size + emb_size,
             hidden_size,
             num_layers,
             dropout=dropout
         )
 
         # Linear layers to produce Q,K,V
-        self.W_q = nn.Linear(hidden_size, hidden_size)
-        self.W_k = nn.Linear(hidden_size, hidden_size)
-        self.W_v = nn.Linear(hidden_size, hidden_size)
+        self.W_q = nn.Linear(emb_size, emb_size)
+        self.W_k = nn.Linear(emb_size, emb_size)
+        self.W_v = nn.Linear(emb_size, emb_size)
 
         self.fc = nn.Linear(hidden_size, output_size)
         self.softmax = nn.Softmax(dim=-1)
+
+        # project hidden dimension → emb_size for attention
+        self.hidden_to_emb = nn.Linear(hidden_size, emb_size)
 
     def forward(self, x, hidden, cell, prev_states):
         """
         x:          (batch,)
         hidden:     (num_layers, batch, H)
         cell:       (num_layers, batch, H)
-        prev_states: list of tensors (1, batch, H) from previous steps
+        prev_states: list of tensors (1, batch, H)
         """
 
         # ---- 1) Embed target token ----
-        x = x.unsqueeze(0)   # (1, batch)
+        x = x.unsqueeze(0)  
         embedded = self.dropout(self.embedding(x))   # (1, batch, E)
 
         # ---- 2) SELF-ATTENTION OVER DECODER’S OWN HISTORY ----
         if len(prev_states) == 0:
-            # No previous states: context = zeros
             batch = embedded.size(1)
-            context = torch.zeros(1, batch, hidden.size(2))
+            context = torch.zeros(1, batch, embedded.size(2))
+            X = embedded
 
         else:
-            # Convert list → tensor
-            # H_prev: (T_prev, batch, H)
-            H_prev = torch.cat(prev_states, dim=0)
+            H_prev = torch.cat(prev_states, dim=0)   # (T_prev, batch, H)
+            H_emb  = self.hidden_to_emb(H_prev)      # (T_prev, batch, E)
 
-            # Current hidden state: use top layer only
-            # hidden: (num_layers, batch, H)
-            h_t = hidden[-1]                     # (batch, H)
+            # Combine past hidden states + current embedding
+            X = torch.cat([H_emb, embedded], dim=0)  # (T_prev+1, batch, E)
 
-            Q = self.W_q(h_t)                    # (batch, H)
-            K = self.W_k(H_prev)                 # (T_prev, batch, H)
-            V = self.W_v(H_prev)                 # (T_prev, batch, H)
+            Q = self.W_q(embedded)            # (1, batch, E)
+            K = self.W_k(X)                   # (T, batch, E)
+            V = self.W_v(X)                   # (T, batch, E)
 
-            # Reshape for attention
-            Q = Q.unsqueeze(1)                   # (batch, 1, H)
-            K = K.permute(1,0,2)                 # (batch, T_prev, H)
-            V = V.permute(1,0,2)                 # (batch, T_prev, H)
+            Q = Q.permute(1,0,2)             # (batch, 1, E)
+            K = K.permute(1,0,2)             # (batch, T, E)
+            V = V.permute(1,0,2)             # (batch, T, E)
 
-            # Compute scores
-            scores = torch.bmm(Q, K.transpose(1,2))   # (batch, 1, T_prev)
-
-            # Attention weights
-            weights = self.softmax(scores)            # (batch, 1, T_prev)
-
-            # Weighted sum
-            context = torch.bmm(weights, V)           # (batch, 1, H)
-            context = context.permute(1,0,2)          # (1, batch, H)
+            scores = torch.bmm(Q, K.transpose(1,2))  # (batch, 1, T)
+            weights = self.softmax(scores)
+            context = torch.bmm(weights, V)          # (batch, 1, E)
+            context = context.permute(1,0,2)         # (1, batch, E)
 
         # ---- 3) Feed LSTM with [embedded + context] ----
-        rnn_input = torch.cat((embedded, context), dim=2)  # (1, batch, E+H)
-
+        rnn_input = torch.cat((embedded, context), dim=2)  # (1, batch, E+E)
         output, (hidden, cell) = self.rnn(rnn_input, (hidden, cell))
 
         # ---- 4) Output word prediction ----
@@ -275,7 +277,9 @@ class Decoder(nn.Module):
 
 
 
-
+# ------------------------------------------------------
+# ---------------------- SEQ2SEQ -----------------------
+# ------------------------------------------------------
 
 class Seq2Seq(nn.Module):
     def __init__(self, encoder, decoder):
@@ -292,16 +296,22 @@ class Seq2Seq(nn.Module):
 
         encoder_states, hidden, cell = self.encoder(src)
 
-        x = trg[:, 0]   # first token (<sos>)
+        x = trg[:, 0]   # <sos>
         prev_outputs = []
+
         for t in range(1, trg_len):
-            pred, hidden, cell = self.decoder(x, hidden, cell,prev_outputs)
-            prev_outputs.append(hidden[-1:].detach())
+            pred, hidden, cell = self.decoder(x, hidden, cell, prev_outputs)
+            prev_outputs.append(hidden[-1].detach().unsqueeze(0))
             outputs[t] = pred
-            x = pred.argmax(1)   # greedy decoding
+            x = pred.argmax(1)   # greedy
 
         return outputs
 
+
+
+# ------------------------------------------------------
+# ---------------------- TRAINING ----------------------
+# ------------------------------------------------------
 
 input_size = len(vocab)
 output_size = len(vocab)
@@ -309,37 +319,37 @@ hidden_size = 5
 num_layers = 5
 dropout = 0.5
 emb_size = 50
+
 encoder = Encoder(input_size, emb_size, hidden_size, num_layers, dropout) 
-decoder = Decoder(output_size, emb_size, hidden_size,num_layers ,dropout)   
+decoder = Decoder(output_size, emb_size, hidden_size, num_layers, dropout)
 model = Seq2Seq(encoder,decoder)
 
 criterion = nn.CrossEntropyLoss(ignore_index=pad_idx)
-optimizer = optim.Adam(model.parameters(), lr=0.001)  
+optimizer = optim.Adam(model.parameters(), lr=0.001)
 
-for epoch in range(5):
+for epoch in range(3):
     for src, trg in loader:
         optimizer.zero_grad()
-        
         outputs = model(src, trg)
-        
-        outputs = outputs[1:].reshape(-1,output_size)
-        
+
+        outputs = outputs[1:].reshape(-1, output_size)
         trg = trg[:, 1:].reshape(-1)
 
-        
         loss = criterion(outputs, trg)
-        
         loss.backward()
-        
         optimizer.step()
-        
+
     print(f"Epoch {epoch+1} | Loss = {loss.item():.4f}")
 
 print("\nTraining complete.")
-        
+
+
+
+# ------------------------------------------------------
+# ---------------------- INFERENCE ----------------------
+# ------------------------------------------------------
 
 index_to_word = {v: k for k, v in vocab.items()}
-
 
 def predict(model,sentence):
     model.eval()
@@ -347,52 +357,35 @@ def predict(model,sentence):
     tokens = sentence.lower().split()
     ids = text_to_indices(tokens,vocab)
     
-    src = torch.tensor(ids)
-    src = src.unsqueeze(0)
+    src = torch.tensor(ids).unsqueeze(0)
+
     if src.size(1) < max_len:
         src = torch.nn.functional.pad(
             src, (0, max_len - src.size(1)), value=pad_idx
         )
+
     with torch.no_grad():
-        output, hidden, cell = model.encoder(src)
+        _, hidden, cell = model.encoder(src)
         
     x = torch.tensor([vocab['<sos>']])
-    
     outputs = []
     prev_outputs = []
+
     for _ in range(max_len):
         with torch.no_grad():
-            out, hidden, cell = model.decoder(x ,hidden, cell,prev_outputs)
-            
+            out, hidden, cell = model.decoder(x, hidden, cell, prev_outputs)
+
         next_tok = out.argmax(1).item()
-        prev_outputs.append(hidden[-1:].detach())
-        if next_tok== vocab['<eos>']:
+        prev_outputs.append(hidden[-1].detach().unsqueeze(0))
+
+        if next_tok == vocab['<eos>']:
             break
+
         outputs.append(next_tok)
         x = torch.tensor([next_tok])
         
     words = [index_to_word[i] for i in outputs]
-    
-    return words[0]
+    return words[0] if words else ""
 
-
-write = input("wnter the words")
-
-
-print("the predicteds word is")
-
-print(predict(model,write))
-        
-        
-    
-    
-        
-#i havent trained this properls and epoch is very less so it is not accurate enough
-        
-        
-        
-        
-        
-        
-        
-        
+write = input("Enter a sentence: ")
+print("Predicted next word:", predict(model, write))
